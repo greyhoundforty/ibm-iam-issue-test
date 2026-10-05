@@ -34,7 +34,7 @@ from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_platform_services import IamIdentityV1, IamPolicyManagementV1
 
 VIEWER_ROLE = "crn:v1:bluemix:public:iam::::role:Viewer"
-DEFAULT_CODEENGINE_PROJECT_ID = "353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
+DEFAULT_CODEENGINE_PROJECT_ID = ""
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "out" / "state.json"
 ACCOUNT_IDENTITY = "account-api-key"
