@@ -1,5 +1,7 @@
 # Copy to terraform.tfvars only if you want to override defaults.
 # Do not put an API key in this file. Export IBMCLOUD_API_KEY instead.
-registry_namespace = "repro-namespace"
-registry_region    = "jp-tok"
-name_prefix        = "dreamvu-iam-repro"
+registry_namespace    = "dreamvu-data-mover"
+registry_region       = "jp-tok"
+codeengine_region     = "jp-tok"
+codeengine_project_id = "353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
+name_prefix           = "dreamvu-iam-repro"

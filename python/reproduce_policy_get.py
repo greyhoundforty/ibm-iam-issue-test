@@ -11,7 +11,8 @@ Phases:
   3. Remove that registry grant.
 
 The customer report is 403, then 200, then 403, while the policy being read
-targets Code Engine the whole time.
+targets one Code Engine project the whole time. That policy grants Viewer and
+Writer, with region jp-tok and the project GUID as serviceInstance.
 
 Each phase GETs that policy twice: once with the account API key from the
 environment, and once with the caller service ID API key. Pass --brief for a
@@ -33,7 +34,7 @@ from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_platform_services import IamIdentityV1, IamPolicyManagementV1
 
 VIEWER_ROLE = "crn:v1:bluemix:public:iam::::role:Viewer"
-POLICY_DESCRIPTION = "Code Engine policy read by the caller service ID during refresh"
+DEFAULT_CODEENGINE_PROJECT_ID = "353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "out" / "state.json"
 ACCOUNT_IDENTITY = "account-api-key"
@@ -222,6 +223,7 @@ def access_policy(
     account: str,
     attributes: list[dict[str, str]],
     description: str,
+    roles: list[dict[str, str]] | None = None,
 ) -> str:
     resource_attributes = [
         {"name": "accountId", "value": account, "operator": "stringEquals"},
@@ -230,7 +232,7 @@ def access_policy(
     created = policy.create_policy(
         type="access",
         subjects=[{"attributes": [{"name": "iam_id", "value": subject_iam_id}]}],
-        roles=[{"role_id": VIEWER_ROLE}],
+        roles=roles or [{"role_id": VIEWER_ROLE}],
         resources=[{"attributes": resource_attributes}],
         description=description,
     ).get_result()
@@ -238,8 +240,35 @@ def access_policy(
     return created["id"]
 
 
+def roles_for_service(policy: IamPolicyManagementV1, service_name: str, names: list[str]) -> list[dict[str, str]]:
+    listed = policy.list_roles(service_name=service_name, policy_type="access").get_result()
+    found: dict[str, str] = {}
+    for bucket in ("system_roles", "service_roles", "custom_roles"):
+        for role in listed.get(bucket) or []:
+            display = role.get("display_name")
+            crn = role.get("crn")
+            if display and crn and display not in found:
+                found[display] = crn
+    missing = [name for name in names if name not in found]
+    if missing:
+        known = ", ".join(sorted(found)) or "(none)"
+        raise SystemExit(f"No IAM role named {', '.join(missing)} for {service_name}. Known roles: {known}")
+    chosen = [{"role_id": found[name]} for name in names]
+    for name, role in zip(names, chosen):
+        print(f"role {name} for {service_name}: {role['role_id']}")
+    return chosen
+
+
 def service_attributes(service_name: str) -> list[dict[str, str]]:
     return [{"name": "serviceName", "value": service_name, "operator": "stringEquals"}]
+
+
+def codeengine_attributes(region: str, project_id: str) -> list[dict[str, str]]:
+    return [
+        {"name": "serviceName", "value": "codeengine", "operator": "stringEquals"},
+        {"name": "region", "value": region, "operator": "stringEquals"},
+        {"name": "serviceInstance", "value": project_id, "operator": "stringEquals"},
+    ]
 
 
 def registry_attributes(region: str, namespace: str) -> list[dict[str, str]]:
@@ -283,20 +312,6 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
         "Subject of the Code Engine policy the caller reads.",
     )
     caller_key = create_api_key(identity, account, caller["iam_id"], f"{prefix}-caller-key")
-    iam_policy_id = access_policy(
-        policy,
-        subject_iam_id=caller["iam_id"],
-        account=account,
-        attributes=service_attributes("iam-access-management"),
-        description="Viewer on IAM Access Management",
-    )
-    codeengine_policy_id = access_policy(
-        policy,
-        subject_iam_id=subject["iam_id"],
-        account=account,
-        attributes=service_attributes("codeengine"),
-        description=POLICY_DESCRIPTION,
-    )
     state = {
         "account_id": account,
         "caller_iam_id": caller["iam_id"],
@@ -304,12 +319,31 @@ def setup(args: argparse.Namespace) -> dict[str, Any]:
         "caller_api_key": caller_key,
         "subject_iam_id": subject["iam_id"],
         "subject_service_id": subject["id"],
-        "iam_access_policy_id": iam_policy_id,
-        "codeengine_policy_id": codeengine_policy_id,
+        "iam_access_policy_id": None,
+        "codeengine_policy_id": None,
+        "codeengine_region": args.codeengine_region,
+        "codeengine_project_id": args.codeengine_project_id,
         "registry_policy_id": None,
         "registry_region": args.registry_region,
         "registry_namespace": args.registry_namespace,
     }
+    save_state(state)
+    state["iam_access_policy_id"] = access_policy(
+        policy,
+        subject_iam_id=caller["iam_id"],
+        account=account,
+        attributes=service_attributes("iam-access-management"),
+        description="Viewer on IAM Access Management",
+    )
+    save_state(state)
+    state["codeengine_policy_id"] = access_policy(
+        policy,
+        subject_iam_id=subject["iam_id"],
+        account=account,
+        attributes=codeengine_attributes(args.codeengine_region, args.codeengine_project_id),
+        description="Viewer and Writer on one Code Engine project",
+        roles=roles_for_service(policy, "codeengine", ["Viewer", "Writer"]),
+    )
     save_state(state)
     print(f"wrote {STATE_PATH}")
     return state
@@ -448,6 +482,9 @@ def print_summary(
     print()
     print(style.bold("Summary"))
     print(f"Code Engine policy {state['codeengine_policy_id']}")
+    project_id = state.get("codeengine_project_id")
+    if project_id:
+        print(f"Code Engine scope {state.get('codeengine_region', 'jp-tok')} / {project_id}, roles Viewer and Writer")
     print(
         "Registry grant "
         f"{state['registry_region']} / {state['registry_namespace']} "
@@ -563,7 +600,9 @@ def parse_args() -> argparse.Namespace:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--name-prefix", default="dreamvu-iam-repro")
     common.add_argument("--registry-region", default="jp-tok")
-    common.add_argument("--registry-namespace", default="repro-namespace")
+    common.add_argument("--registry-namespace", default="dreamvu-data-mover")
+    common.add_argument("--codeengine-region", default="jp-tok")
+    common.add_argument("--codeengine-project-id", default=DEFAULT_CODEENGINE_PROJECT_ID)
     common.add_argument("--initial-wait", type=int, default=20)
     common.add_argument(
         "--timeout",

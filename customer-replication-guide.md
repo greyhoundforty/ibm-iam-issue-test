@@ -43,17 +43,36 @@ IBM returned:
 
 A reproduction of the reported behavior would be **403**, then **200**, then **403**. We observed **403**, **403**, **403**.
 
-## What we created
+The Code Engine policy in those runs was account-wide platform Viewer. It was not scoped to a project.
+
+## Follow-up configuration
+
+The customer policy that showed the behavior is Viewer and Writer on one Code Engine project, created with `iam_service_id`. The test now uses that shape:
+
+```hcl
+resource "ibm_iam_service_policy" "subject_codeengine" {
+  iam_service_id = ibm_iam_service_id.subject.id
+  roles          = ["Viewer", "Writer"]
+
+  resources {
+    service              = "codeengine"
+    region               = "jp-tok"
+    resource_instance_id = "353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
+  }
+}
+```
+
+The registry grant in the middle phase is platform Viewer on `container-registry`, region `jp-tok`, resource type `namespace`, resource `dreamvu-data-mover`. Both values are IAM attributes. The test does not create the project or the namespace.
+
+## What the test creates
 
 | Resource | Who it is attached to | Role | Target |
 | --- | --- | --- | --- |
 | Caller service ID and its API key | The identity that calls the GET |  |  |
 | Access policy | Caller | Platform Viewer | `serviceName=iam-access-management` |
 | Subject service ID | A different identity |  |  |
-| Access policy, this is the ID we GET | Subject | Platform Viewer | `serviceName=codeengine` |
-| Access policy, present only in the middle phase | Caller | Platform Viewer | `serviceName=container-registry`, `region=jp-tok`, `resourceType=namespace`, `resource=<namespace>` |
-
-The Code Engine policy is account-wide for that service. It is not scoped to a project, region, or resource group. The registry value is an IAM resource attribute. The test does not create a Container Registry namespace.
+| Access policy, this is the ID we GET | Subject | Platform Viewer and service Writer | `serviceName=codeengine`, `region=jp-tok`, `serviceInstance=353e8ce5-42e6-49b6-b1b2-b7f1feff343a` |
+| Access policy, present only in the middle phase | Caller | Platform Viewer | `serviceName=container-registry`, `region=jp-tok`, `resourceType=namespace`, `resource=dreamvu-data-mover` |
 
 ## How the GET is authenticated
 
@@ -73,8 +92,9 @@ Terraform:
 
 ```bash
 export IBMCLOUD_API_KEY="..."
-export REGISTRY_NAMESPACE="your-namespace"   # default: repro-namespace
-export REGISTRY_REGION="jp-tok"              # default
+export REGISTRY_NAMESPACE="dreamvu-data-mover"   # default
+export REGISTRY_REGION="jp-tok"                  # default
+export CODEENGINE_PROJECT_ID="353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
 scripts/terraform_repro.sh
 scripts/terraform_repro.sh cleanup
 ```
@@ -87,7 +107,7 @@ Python, same grants and the same GET, with the request and response printed:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r python/requirements.txt
-python python/reproduce_policy_get.py run --registry-namespace your-namespace
+python python/reproduce_policy_get.py run --brief --registry-namespace dreamvu-data-mover --codeengine-project-id 353e8ce5-42e6-49b6-b1b2-b7f1feff343a
 python python/reproduce_policy_get.py cleanup
 ```
 
@@ -95,10 +115,13 @@ Setup creates the policy with v1 `create_policy`, which is the create path provi
 
 ## Details worth comparing
 
-If this still differs from the failing environment, these are the choices we made:
+The follow-up test matches the customer resource on these points:
 
 - Caller and policy subject are two different service IDs.
-- The role is platform Viewer (`crn:v1:bluemix:public:iam::::role:Viewer`), not a service role such as Reader.
-- The Code Engine policy has only `serviceName=codeengine` and the account ID.
-- The registry grant is limited to one namespace in `jp-tok`.
-- The call is `GET /v2/policies/{id}` during `ibm_iam_service_policy` refresh, not a policy list call.
+- The Code Engine policy uses `iam_service_id`.
+- Roles are platform Viewer and service Writer.
+- The Code Engine target is `jp-tok` and project `353e8ce5-42e6-49b6-b1b2-b7f1feff343a`.
+- The registry grant is namespace `dreamvu-data-mover` in `jp-tok`.
+- The call is `GET /v2/policies/{id}` during `ibm_iam_service_policy` refresh.
+
+The September runs above used an account-wide Code Engine Viewer policy, so they do not answer this comparison.

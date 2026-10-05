@@ -19,7 +19,19 @@ variable "registry_region" {
 variable "registry_namespace" {
   type        = string
   description = "Container Registry namespace attribute. The namespace does not have to exist; IAM stores the attribute and the access decision uses it."
-  default     = "repro-namespace"
+  default     = "dreamvu-data-mover"
+}
+
+variable "codeengine_region" {
+  type        = string
+  description = "Region on the Code Engine policy."
+  default     = "jp-tok"
+}
+
+variable "codeengine_project_id" {
+  type        = string
+  description = "Code Engine project GUID stored as serviceInstance on the policy. This is the project from the customer resource."
+  default     = "353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
 }
 
 variable "grant_registry_viewer" {

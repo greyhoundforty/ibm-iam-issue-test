@@ -15,8 +15,10 @@ ADMIN_DIR="$ROOT/terraform/admin"
 REFRESH_DIR="$ROOT/terraform/refresh"
 OUT_DIR="$ROOT/out"
 WAIT_SECONDS="${WAIT_SECONDS:-45}"
-REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-repro-namespace}"
+REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-dreamvu-data-mover}"
 REGISTRY_REGION="${REGISTRY_REGION:-jp-tok}"
+CODEENGINE_REGION="${CODEENGINE_REGION:-jp-tok}"
+CODEENGINE_PROJECT_ID="${CODEENGINE_PROJECT_ID:-353e8ce5-42e6-49b6-b1b2-b7f1feff343a}"
 NAME_PREFIX="${NAME_PREFIX:-dreamvu-iam-repro}"
 
 mkdir -p "$OUT_DIR"
@@ -40,13 +42,14 @@ admin_apply() {
     -var "grant_registry_viewer=${grant}" \
     -var "registry_namespace=${REGISTRY_NAMESPACE}" \
     -var "registry_region=${REGISTRY_REGION}" \
+    -var "codeengine_region=${CODEENGINE_REGION}" \
+    -var "codeengine_project_id=${CODEENGINE_PROJECT_ID}" \
     -var "name_prefix=${NAME_PREFIX}"
 }
 
 refresh_plan() {
   local phase="$1"
   local caller_key="$2"
-  local subject_iam_id="$3"
   local log_file="$OUT_DIR/${phase}.log"
 
   use_key "$caller_key"
@@ -54,7 +57,9 @@ refresh_plan() {
   echo "======== terraform phase ${phase} ========"
   set +e
   TF_LOG_PROVIDER=DEBUG terraform -chdir="$REFRESH_DIR" plan -refresh-only -input=false -no-color \
-    -var "subject_iam_id=${subject_iam_id}" \
+    -var "subject_service_id=${subject_service_id}" \
+    -var "codeengine_region=${CODEENGINE_REGION}" \
+    -var "codeengine_project_id=${CODEENGINE_PROJECT_ID}" \
     >"$log_file" 2>&1
   local code=$?
   set -e
@@ -83,6 +88,8 @@ cleanup() {
     -var "grant_registry_viewer=false" \
     -var "registry_namespace=${REGISTRY_NAMESPACE}" \
     -var "registry_region=${REGISTRY_REGION}" \
+    -var "codeengine_region=${CODEENGINE_REGION}" \
+    -var "codeengine_project_id=${CODEENGINE_PROJECT_ID}" \
     -var "name_prefix=${NAME_PREFIX}"
   rm -rf "$REFRESH_DIR"/terraform.tfstate "$REFRESH_DIR"/terraform.tfstate.backup
 }
@@ -98,33 +105,36 @@ terraform -chdir="$REFRESH_DIR" init -input=false
 
 admin_apply false
 
-subject_iam_id="$(terraform -chdir="$ADMIN_DIR" output -raw subject_iam_id)"
+subject_service_id="$(terraform -chdir="$ADMIN_DIR" output -raw subject_service_id)"
 policy_tf_id="$(terraform -chdir="$ADMIN_DIR" output -raw codeengine_policy_terraform_id)"
 caller_key="$(terraform -chdir="$ADMIN_DIR" output -raw caller_api_key)"
 
-echo "subject: ${subject_iam_id}"
+echo "subject service id: ${subject_service_id}"
+echo "codeengine project: ${CODEENGINE_REGION} / ${CODEENGINE_PROJECT_ID}"
+echo "registry namespace: ${REGISTRY_REGION} / ${REGISTRY_NAMESPACE}"
 echo "policy terraform id: ${policy_tf_id}"
 echo "waiting ${WAIT_SECONDS}s for the IAM Access Management grant to propagate"
 sleep "$WAIT_SECONDS"
 
 use_key "$admin_key"
-if ! terraform -chdir="$REFRESH_DIR" state list 2>/dev/null | grep -qx 'ibm_iam_service_policy.codeengine'; then
-  terraform -chdir="$REFRESH_DIR" import -input=false \
-    -var "subject_iam_id=${subject_iam_id}" \
-    ibm_iam_service_policy.codeengine "$policy_tf_id"
-fi
+rm -f "$REFRESH_DIR/terraform.tfstate" "$REFRESH_DIR/terraform.tfstate.backup"
+terraform -chdir="$REFRESH_DIR" import -input=false \
+  -var "subject_service_id=${subject_service_id}" \
+  -var "codeengine_region=${CODEENGINE_REGION}" \
+  -var "codeengine_project_id=${CODEENGINE_PROJECT_ID}" \
+  ibm_iam_service_policy.codeengine "$policy_tf_id"
 
-refresh_plan baseline "$caller_key" "$subject_iam_id"
+refresh_plan baseline "$caller_key"
 
 admin_apply true
 echo "waiting ${WAIT_SECONDS}s for the Container Registry grant to propagate"
 sleep "$WAIT_SECONDS"
-refresh_plan with-registry-viewer "$caller_key" "$subject_iam_id"
+refresh_plan with-registry-viewer "$caller_key"
 
 admin_apply false
 echo "waiting ${WAIT_SECONDS}s for the Container Registry grant removal to propagate"
 sleep "$WAIT_SECONDS"
-refresh_plan after-revoke "$caller_key" "$subject_iam_id"
+refresh_plan after-revoke "$caller_key"
 
 baseline="$(cat "$OUT_DIR/baseline.exit")"
 with_registry="$(cat "$OUT_DIR/with-registry-viewer.exit")"

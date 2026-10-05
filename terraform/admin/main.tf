@@ -25,11 +25,13 @@ resource "ibm_iam_service_policy" "caller_iam_access_management" {
 }
 
 resource "ibm_iam_service_policy" "subject_codeengine" {
-  iam_id      = ibm_iam_service_id.subject.iam_id
-  roles       = ["Viewer"]
-  description = "Code Engine policy read by the caller service ID during refresh"
+  iam_service_id = ibm_iam_service_id.subject.id
+  roles          = ["Viewer", "Writer"]
+
   resources {
-    service = "codeengine"
+    service              = "codeengine"
+    region               = var.codeengine_region
+    resource_instance_id = var.codeengine_project_id
   }
 }
 

@@ -4,14 +4,19 @@
 # GET /v2/policies/{id}. This configuration is imported by an administrator,
 # then planned with -refresh-only using the caller service ID API key.
 #
+# The resource arguments match the customer policy: iam_service_id, Viewer
+# and Writer, and a Code Engine project in jp-tok.
+#
 # Do not apply this stack as the caller. Apply would try to create or update
 # the policy. The runner only uses plan -refresh-only.
 
 resource "ibm_iam_service_policy" "codeengine" {
-  iam_id      = var.subject_iam_id
-  roles       = ["Viewer"]
-  description = "Code Engine policy read by the caller service ID during refresh"
+  iam_service_id = var.subject_service_id
+  roles          = ["Viewer", "Writer"]
+
   resources {
-    service = "codeengine"
+    service              = "codeengine"
+    region               = var.codeengine_region
+    resource_instance_id = var.codeengine_project_id
   }
 }

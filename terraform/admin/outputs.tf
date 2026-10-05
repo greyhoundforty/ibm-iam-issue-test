@@ -11,8 +11,13 @@ output "subject_iam_id" {
   value = ibm_iam_service_id.subject.iam_id
 }
 
+output "subject_service_id" {
+  description = "Service ID value used by iam_service_id. Provider 2.5.0 stores the policy id as iam-<this>/<policy_id>."
+  value       = ibm_iam_service_id.subject.id
+}
+
 output "codeengine_policy_terraform_id" {
-  description = "ibm_iam_service_policy id, <iam_id>/<policy_id>. Provider 2.5.0 splits this and calls GetV2Policy with the policy id."
+  description = "ibm_iam_service_policy id. Provider 2.5.0 splits this and calls GetV2Policy with the policy id."
   value       = ibm_iam_service_policy.subject_codeengine.id
 }
 
