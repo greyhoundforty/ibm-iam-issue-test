@@ -1,24 +1,29 @@
 # IAM policy GET reproduction
 
-Please review this flow and confirm it is the path that returns the error.
+The service ID kept returning **403** on `GET /v2/policies/{id}`. The account API key returned **200** on the same policy every time, so the policy exists and the denial is the caller.
 
-A caller service ID has platform **Viewer** on IAM Access Management for the whole test. A second service ID owns a **Viewer + Writer** policy scoped to one Code Engine project. The test reads that policy with `GET /v2/policies/{id}` three times:
-
-1. Registry Viewer is absent.
-2. Platform Viewer is added on one Container Registry namespace.
-3. That registry grant is removed.
-
-The policy ID does not change. Only the caller's registry grant changes. The reported result is **403**, then **200**, then **403**. In this account the caller service ID stayed **403** in all three phases. The account API key could read the same policy throughout.
+The customer report is **403**, then **200**, then **403**, with the only change being a Container Registry grant. That pattern did not show up here. After the caller was given the standing grants from `svc-terraform-ibm`, almost every check stayed **403**. The one read that returned **200** was while the caller had Code Engine **Viewer and Reader** on the same project as the policy. Removing that grant returned **403** again. Custom `namespace.list`, platform Viewer on the registry namespace, IAM Identity service-ID Viewer, and resource-group Viewer did not change the 403.
 
 Terraform provider `IBM-Cloud/ibm` **2.5.0** hits this on refresh of `ibm_iam_service_policy`. Read calls `GetV2Policy(policyID)` in the IAM Policy Management Go SDK. That is `GET https://iam.cloud.ibm.com/v2/policies/{id}`.
 
-## Flow to confirm
+The validated project was `38c22f4f-9545-4d18-ab30-b91c4b9b2540` in `jp-tok`. The registry namespace was `rst-iamdemo-ns`. The policy being read was Viewer and Writer on that project, owned by a second service ID.
 
-| Phase | Caller grants | Policy being read |
-| --- | --- | --- |
-| Baseline | Viewer on `iam-access-management` | Viewer and Writer on one Code Engine project |
-| With registry | Baseline plus Viewer on `container-registry`, `jp-tok`, namespace `dreamvu-data-mover` | Same Code Engine policy |
-| After revoke | Baseline only | Same Code Engine policy |
+## Test 1: registry grant on top of the standing set
+
+The caller kept four grants for every read:
+
+- IAM Access Management Viewer
+- IAM Identity service-ID Viewer (`iam-identity`, `resourceType=serviceid`)
+- Code Engine Viewer and Reader on the project
+- Resource-group Viewer on every resource group
+
+Custom `namespace.list` (`container-registry.namespace.list` on `jp-tok` / `rst-iamdemo-ns`) was absent, then added, then removed. Policy `ff0cae3f-c799-4b68-b88b-9fcd203a970e`. Because Code Engine Viewer and Reader was already present, this run never saw a 403.
+
+| Phase | Service ID |
+| --- | --- |
+| Registry grant absent | **200** |
+| `namespace.list` added | **200** |
+| `namespace.list` removed, three reads | **200** |
 
 ```mermaid
 sequenceDiagram
@@ -27,33 +32,98 @@ sequenceDiagram
     participant IAM as IAM Policy API
     actor Caller as Caller service ID
 
-    Note over Admin,Caller: Setup uses the account API key
+    Note over Admin,Caller: Standing grants stay for every read, including Code Engine Viewer and Reader
     Admin->>IAM: Create caller and subject service IDs
-    Admin->>IAM: Caller gets Viewer on iam-access-management
-    Admin->>IAM: Subject policy uses iam_service_id, roles Viewer and Writer, codeengine, jp-tok, project 353e8ce5-42e6-49b6-b1b2-b7f1feff343a
+    Admin->>IAM: Subject policy ff0cae3f, Viewer and Writer, codeengine, jp-tok, project 38c22f4f-9545-4d18-ab30-b91c4b9b2540
+    Admin->>IAM: Caller gets IAM Access Management Viewer, IAM Identity service-ID Viewer, Code Engine Viewer and Reader, resource-group Viewer
 
-    Note over Admin,Caller: Baseline. Registry Viewer is absent. IAM Access Management Viewer stays
-    Admin->>IAM: GET /v2/policies/{id}
-    IAM-->>Admin: Account key can read the policy
-    Caller->>IAM: GET /v2/policies/{id}
-    IAM-->>Caller: Record status. Reported result is 403
+    Note over Admin,Caller: Registry grant is absent
+    Admin->>IAM: GET /v2/policies/ff0cae3f-c799-4b68-b88b-9fcd203a970e
+    IAM-->>Admin: HTTP 200
+    Caller->>IAM: GET /v2/policies/ff0cae3f-c799-4b68-b88b-9fcd203a970e
+    IAM-->>Caller: HTTP 200
 
-    Note over Admin,Caller: Add the registry grant, then read the same policy
-    Admin->>IAM: Add Viewer on container-registry, jp-tok, namespace dreamvu-data-mover
-    Admin->>IAM: GET /v2/policies/{id}
-    IAM-->>Admin: Account key can read the policy
-    Caller->>IAM: GET /v2/policies/{id}, up to 3 attempts
-    IAM-->>Caller: Record status. Reported result is 200
+    Note over Admin,Caller: Add custom namespace.list on jp-tok / rst-iamdemo-ns
+    Admin->>IAM: Add namespace.list
+    Caller->>IAM: GET /v2/policies/ff0cae3f-c799-4b68-b88b-9fcd203a970e
+    IAM-->>Caller: HTTP 200
 
-    Note over Admin,Caller: Remove the registry grant, then read the same policy
-    Admin->>IAM: Delete the registry Viewer policy
-    Admin->>IAM: GET /v2/policies/{id}
-    IAM-->>Admin: Account key can read the policy
-    Caller->>IAM: GET /v2/policies/{id}, up to 3 attempts
-    IAM-->>Caller: Record status. Reported result is 403
+    Note over Admin,Caller: Remove namespace.list. The other four grants stay
+    Admin->>IAM: Delete namespace.list
+    Caller->>IAM: GET /v2/policies/ff0cae3f-c799-4b68-b88b-9fcd203a970e, 3 attempts
+    IAM-->>Caller: HTTP 200
 ```
 
-Python prints both reads on every phase. Terraform `plan -refresh-only` runs only the caller read. The account-key read in Terraform is the import of `ibm_iam_service_policy`.
+## Test 2: one extra grant at a time
+
+IAM Access Management Viewer stayed on the caller. Each other grant was added, read, and removed before the next one. Policy `a7520720-d094-4e72-9e35-bd1ccd2e0f23`. The service ID was **403** on every check except the Code Engine pair.
+
+| Extra grant | While present | After removal |
+| --- | --- | --- |
+| None. IAM Access Management Viewer only | 403 |  |
+| IAM Identity service-ID Viewer | 403 | 403 |
+| Code Engine Viewer and Reader on the project | **200** | **403** |
+| Custom `namespace.list` on `jp-tok` / `rst-iamdemo-ns` | 403 | 403 |
+| Platform Viewer on that namespace | 403 | 403 |
+| Resource-group Viewer | 403 | 403 |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Admin as Account API key
+    participant IAM as IAM Policy API
+    actor Caller as Caller service ID
+
+    Note over Admin,Caller: IAM Access Management Viewer stays for every read
+    Admin->>IAM: Subject policy a7520720, Viewer and Writer, codeengine, jp-tok, project 38c22f4f-9545-4d18-ab30-b91c4b9b2540
+    Admin->>IAM: Caller gets IAM Access Management Viewer
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 403
+
+    Note over Admin,Caller: IAM Identity service-ID Viewer
+    Admin->>IAM: Add Viewer on iam-identity, resource type serviceid
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23, 3 attempts
+    IAM-->>Caller: HTTP 403
+    Admin->>IAM: Delete that Identity grant
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 403
+
+    Note over Admin,Caller: Code Engine Viewer and Reader. Only check that returned 200
+    Admin->>IAM: Add Viewer and Reader on the project
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 200
+    Admin->>IAM: Delete that Code Engine grant
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 403
+
+    Note over Admin,Caller: Custom namespace.list
+    Admin->>IAM: Add namespace.list on jp-tok / rst-iamdemo-ns
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23, 3 attempts
+    IAM-->>Caller: HTTP 403
+    Admin->>IAM: Delete that namespace.list grant
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 403
+
+    Note over Admin,Caller: Platform Viewer on the same namespace
+    Admin->>IAM: Add platform Viewer on jp-tok / rst-iamdemo-ns
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23, 3 attempts
+    IAM-->>Caller: HTTP 403
+    Admin->>IAM: Delete that platform Viewer grant
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 403
+
+    Note over Admin,Caller: Resource-group Viewer
+    Admin->>IAM: Add Viewer on resource-group
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23, 3 attempts
+    IAM-->>Caller: HTTP 403
+    Admin->>IAM: Delete that resource-group grant
+    Caller->>IAM: GET /v2/policies/a7520720-d094-4e72-9e35-bd1ccd2e0f23
+    IAM-->>Caller: HTTP 403
+```
+
+The account API key was **200** on every phase above. Each **200** body was still `serviceName=codeengine`.
+
+An earlier three-phase check, with only IAM Access Management Viewer plus platform Viewer on a registry namespace, also stayed **403**, **403**, **403**.
 
 ## Policy shape
 
@@ -67,21 +137,21 @@ resource "ibm_iam_service_policy" "subject_codeengine" {
   resources {
     service              = "codeengine"
     region               = "jp-tok"
-    resource_instance_id = "353e8ce5-42e6-49b6-b1b2-b7f1feff343a"
+    resource_instance_id = "38c22f4f-9545-4d18-ab30-b91c4b9b2540"
   }
 }
 ```
 
-Provider 2.5.0 stores that as `serviceName=codeengine`, `region=jp-tok`, and `serviceInstance=353e8ce5-42e6-49b6-b1b2-b7f1feff343a`. Python asks IAM for the Code Engine role list and uses the CRNs returned for the display names Viewer and Writer.
+Provider 2.5.0 stores that as `serviceName=codeengine`, `region=jp-tok`, and `serviceInstance=38c22f4f-9545-4d18-ab30-b91c4b9b2540`. Python asks IAM for the Code Engine role list and uses the CRNs returned for the display names Viewer and Writer. The customer resource that started this work used project `353e8ce5-42e6-49b6-b1b2-b7f1feff343a`.
 
-The registry grant, present only in the middle phase, is platform Viewer on the caller:
+The earlier three-phase registry grant is platform Viewer on the caller. The 5 October checks also used custom `namespace.list` on `rst-iamdemo-ns`:
 
 ```hcl
 resources {
   service       = "container-registry"
   region        = "jp-tok"
   resource_type = "namespace"
-  resource      = "dreamvu-data-mover"
+  resource      = "rst-iamdemo-ns"
 }
 ```
 
@@ -144,6 +214,8 @@ python python/reproduce_policy_get.py cleanup
 
 Exit `2` means the service ID statuses were 403, then 200, then 403. Exit `0` means those statuses were different and the account key read the policy in every phase. Exit `1` means the account key did not get HTTP 200 in every phase. Caller credentials are stored in `python/out/state.json`.
 
-## What a match would show
+## What the checks showed
 
-On the middle phase the response body would still be the Code Engine project policy. The registry grant would not retarget it. Only the caller service ID's ability to read it would change. That change did not occur in this account: the service ID read stayed denied after the registry Viewer grant was added and after it was removed.
+The caller service ID stayed **403** for IAM Access Management Viewer alone, IAM Identity service-ID Viewer, custom `namespace.list`, platform Container Registry Viewer, and resource-group Viewer. The registry add/remove in the first test did not produce a 403, because Code Engine Viewer and Reader was already on the caller and that read was already **200**.
+
+The customer pattern, **403** then **200** then **403** as the registry grant comes and goes, was not reproduced. The grant that changed the read in this account was Code Engine Viewer and Reader on project `38c22f4f-9545-4d18-ab30-b91c4b9b2540`.
