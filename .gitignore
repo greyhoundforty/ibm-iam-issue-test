@@ -1,4 +1,5 @@
 ## Terraform
+.worktrees/
 terraform/admin/*.tfstate
 terraform/admin/.terraform/
 terraform/refresh/.terraform/
